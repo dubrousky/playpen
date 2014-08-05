@@ -255,6 +255,36 @@ static void handle_input(struct epoll_event *evt, int epoll_fd, GDBusConnection 
     }
 }
 
+static void write_stdin_to_input(int in_fd) {
+    uint8_t buffer[PIPE_BUF];
+    for (;;) {
+        ssize_t bytes_read = read(STDIN_FILENO, buffer, sizeof buffer);
+        check_posix(bytes_read, "read");
+        ssize_t bytes_written = write(in_fd, buffer, (size_t)bytes_read);
+        if (bytes_written == -1) {
+            if (errno == EAGAIN) break;
+            err(EXIT_FAILURE, "write");
+        }
+
+        if (bytes_read < (ssize_t)sizeof buffer) {
+            close(STDIN_FILENO);
+            close(in_fd);
+            break;
+        }
+    }
+}
+
+static void write_buffer_to_input(int epoll_fd, int in_fd, uint8_t *buffer, ssize_t *buffer_size) {
+    if (*buffer_size == 0) return;
+    ssize_t bytes_written = write(in_fd, buffer, (size_t)*buffer_size);
+    if (bytes_written == -1) {
+        if (errno == EAGAIN) return;
+        err(EXIT_FAILURE, "write");
+    }
+    epoll_watch(epoll_fd, STDIN_FILENO);
+    *buffer_size = 0;
+}
+
 int main(int argc, char **argv) {
     g_log_set_always_fatal(G_LOG_LEVEL_WARNING | G_LOG_LEVEL_CRITICAL);
 
@@ -546,34 +576,10 @@ int main(int argc, char **argv) {
 
             if (evt->events & EPOLLOUT && evt->data.fd == pipe_in[1]) {
                 if (stdin_non_epoll) {
-                    for (;;) {
-                        stdin_bytes_read = read(STDIN_FILENO, stdin_buffer, sizeof stdin_buffer);
-                        check_posix(stdin_bytes_read, "read");
-                        ssize_t bytes_written = write(pipe_in[1], stdin_buffer,
-                                                      (size_t)stdin_bytes_read);
-                        if (bytes_written == -1) {
-                            if (errno == EAGAIN) break;
-                            err(EXIT_FAILURE, "write");
-                        }
-
-                        if (stdin_bytes_read < (ssize_t)sizeof stdin_buffer) {
-                            close(STDIN_FILENO);
-                            close(pipe_in[1]);
-                            break;
-                        }
-                    }
-
-                    continue;
+                    write_stdin_to_input(pipe_in[1]);
+                } else {
+                    write_buffer_to_input(epoll_fd, pipe_in[1], stdin_buffer, &stdin_bytes_read);
                 }
-
-                if (stdin_bytes_read == 0) continue;
-                ssize_t bytes_written = write(pipe_in[1], stdin_buffer, (size_t)stdin_bytes_read);
-                if (bytes_written == -1) {
-                    if (errno == EAGAIN) continue;
-                    err(EXIT_FAILURE, "write");
-                }
-                epoll_watch(epoll_fd, STDIN_FILENO);
-                stdin_bytes_read = 0;
             }
 
             if (evt->events & EPOLLHUP) {
