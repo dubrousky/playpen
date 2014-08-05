@@ -197,6 +197,64 @@ static long strtolx_positive(const char *s, const char *what) {
     return result;
 }
 
+static void handle_input(struct epoll_event *evt, int epoll_fd, GDBusConnection *connection,
+                         const char *unit_name, int in_fd, int out_fd, int err_fd, int sig_fd,
+                         int timer_fd, uint8_t *stdin_buffer, ssize_t *stdin_bytes_read) {
+    if (evt->data.fd == timer_fd) {
+        warnx("timeout triggered!");
+        stop_scope_unit(connection, unit_name);
+        exit(EXIT_FAILURE);
+    } else if (evt->data.fd == sig_fd) {
+        struct signalfd_siginfo si;
+        ssize_t bytes_r = read(sig_fd, &si, sizeof(si));
+        check_posix(bytes_r, "read");
+
+        if (bytes_r != sizeof(si)) {
+            errx(EXIT_FAILURE, "read the wrong amount of bytes");
+        } else if (si.ssi_signo != SIGCHLD) {
+            errx(EXIT_FAILURE, "got an unexpected signal");
+        }
+
+        switch (si.ssi_code) {
+        case CLD_EXITED:
+            if (si.ssi_status) {
+                warnx("application terminated with error code %d", si.ssi_status);
+            }
+            exit(si.ssi_status);
+        case CLD_KILLED:
+        case CLD_DUMPED:
+            errx(EXIT_FAILURE, "application terminated abnormally with signal %d (%s)",
+                 si.ssi_status, strsignal(si.ssi_status));
+        case CLD_TRAPPED:
+        case CLD_STOPPED:
+        default:
+            break;
+        }
+    } else if (evt->data.fd == out_fd) {
+        copy_pipe_to(out_fd, STDOUT_FILENO);
+    } else if (evt->data.fd == err_fd) {
+        copy_pipe_to(err_fd, STDERR_FILENO);
+    } else if (evt->data.fd == STDIN_FILENO) {
+        *stdin_bytes_read = read(STDIN_FILENO, stdin_buffer, sizeof stdin_buffer);
+        check_posix(*stdin_bytes_read, "read");
+        if (*stdin_bytes_read == 0) {
+            check_posix(epoll_ctl(epoll_fd, EPOLL_CTL_DEL, STDIN_FILENO, NULL), "epoll_ctl");
+            close(STDIN_FILENO);
+            close(in_fd);
+            return;
+        }
+        ssize_t bytes_written = write(in_fd, stdin_buffer, (size_t)*stdin_bytes_read);
+        if (bytes_written == -1) {
+            if (errno == EAGAIN) {
+                check_posix(epoll_ctl(epoll_fd, EPOLL_CTL_DEL, STDIN_FILENO, NULL), "epoll_ctl");
+                return;
+            }
+            err(EXIT_FAILURE, "write");
+        }
+        *stdin_bytes_read = 0;
+    }
+}
+
 int main(int argc, char **argv) {
     g_log_set_always_fatal(G_LOG_LEVEL_WARNING | G_LOG_LEVEL_CRITICAL);
 
@@ -482,61 +540,8 @@ int main(int argc, char **argv) {
             }
 
             if (evt->events & EPOLLIN) {
-                if (evt->data.fd == timer_fd) {
-                    warnx("timeout triggered!");
-                    stop_scope_unit(connection, unit_name);
-                    return EXIT_FAILURE;
-                } else if (evt->data.fd == sig_fd) {
-                    struct signalfd_siginfo si;
-                    ssize_t bytes_r = read(sig_fd, &si, sizeof(si));
-                    check_posix(bytes_r, "read");
-
-                    if (bytes_r != sizeof(si)) {
-                        errx(EXIT_FAILURE, "read the wrong amount of bytes");
-                    } else if (si.ssi_signo != SIGCHLD) {
-                        errx(EXIT_FAILURE, "got an unexpected signal");
-                    }
-
-                    switch (si.ssi_code) {
-                    case CLD_EXITED:
-                        if (si.ssi_status) {
-                            warnx("application terminated with error code %d", si.ssi_status);
-                        }
-                        return si.ssi_status;
-                    case CLD_KILLED:
-                    case CLD_DUMPED:
-                        errx(EXIT_FAILURE, "application terminated abnormally with signal %d (%s)",
-                             si.ssi_status, strsignal(si.ssi_status));
-                    case CLD_TRAPPED:
-                    case CLD_STOPPED:
-                    default:
-                        break;
-                    }
-                } else if (evt->data.fd == pipe_out[0]) {
-                    copy_pipe_to(pipe_out[0], STDOUT_FILENO);
-                } else if (evt->data.fd == pipe_err[0]) {
-                    copy_pipe_to(pipe_err[0], STDERR_FILENO);
-                } else if (evt->data.fd == STDIN_FILENO) {
-                    stdin_bytes_read = read(STDIN_FILENO, stdin_buffer, sizeof stdin_buffer);
-                    check_posix(stdin_bytes_read, "read");
-                    if (stdin_bytes_read == 0) {
-                        check_posix(epoll_ctl(epoll_fd, EPOLL_CTL_DEL, STDIN_FILENO, NULL),
-                                    "epoll_ctl");
-                        close(STDIN_FILENO);
-                        close(pipe_in[1]);
-                        continue;
-                    }
-                    ssize_t bytes_written = write(pipe_in[1], stdin_buffer, (size_t)stdin_bytes_read);
-                    if (bytes_written == -1) {
-                        if (errno == EAGAIN) {
-                            check_posix(epoll_ctl(epoll_fd, EPOLL_CTL_DEL, STDIN_FILENO, NULL),
-                                        "epoll_ctl");
-                            continue;
-                        }
-                        err(EXIT_FAILURE, "write");
-                    }
-                    stdin_bytes_read = 0;
-                }
+                handle_input(evt, epoll_fd, connection, unit_name, pipe_in[1], pipe_out[0],
+                             pipe_err[0], sig_fd, timer_fd, stdin_buffer, &stdin_bytes_read);
             }
 
             if (evt->events & EPOLLOUT && evt->data.fd == pipe_in[1]) {
