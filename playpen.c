@@ -496,7 +496,10 @@ int main(int argc, char **argv) {
             }
         }
 
-        mountx(NULL, pw->pw_dir, "tmpfs", MS_NOSUID|MS_NODEV, NULL);
+        check_posix(unshare(CLONE_NEWUSER), "unshare");
+        puts("unshare succeeded");
+
+        /*mountx(NULL, pw->pw_dir, "tmpfs", MS_NOSUID|MS_NODEV, NULL);*/
 
         // switch to the user's home directory as a login shell would
         check_posix(chdir(pw->pw_dir), "chdir");
@@ -504,9 +507,9 @@ int main(int argc, char **argv) {
         // create a new session
         check_posix(setsid(), "setsid");
 
-        check_posix(initgroups(username, pw->pw_gid), "initgroups");
-        check_posix(setresgid(pw->pw_gid, pw->pw_gid, pw->pw_gid), "setresgid");
-        check_posix(setresuid(pw->pw_uid, pw->pw_uid, pw->pw_uid), "setresuid");
+        /*check_posix(initgroups(username, pw->pw_gid), "initgroups");*/
+        /*check_posix(setresgid(pw->pw_gid, pw->pw_gid, pw->pw_gid), "setresgid");*/
+        /*check_posix(setresuid(pw->pw_uid, pw->pw_uid, pw->pw_uid), "setresuid");*/
 
         char path[] = "PATH=/usr/local/bin:/usr/bin:/bin";
         char *env[] = {path, NULL, NULL, NULL, NULL};
